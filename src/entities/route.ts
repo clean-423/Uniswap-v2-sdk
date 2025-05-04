@@ -1,39 +1,57 @@
 import invariant from 'tiny-invariant'
+import { Currency, Price, Token } from '@uniswap/sdk-core'
 
-import { Token } from './token'
 import { Pair } from './pair'
-import { Price } from './fractions/price'
 
-export class Route {
+export class Route<TInput extends Currency, TOutput extends Currency> {
   public readonly pairs: Pair[]
   public readonly path: Token[]
-  public readonly midPrice: Price
+  public readonly input: TInput
+  public readonly output: TOutput
 
-  constructor(pairs: Pair[], input: Token) {
+  public constructor(pairs: Pair[], input: TInput, output: TOutput) {
     invariant(pairs.length > 0, 'PAIRS')
+    const chainId: number = pairs[0].chainId
     invariant(
-      pairs.map(pair => pair.token0.chainId === pairs[0].token0.chainId).every(x => x),
+      pairs.every(pair => pair.chainId === chainId),
       'CHAIN_IDS'
     )
-    const path = [input]
+
+    const wrappedInput = input.wrapped
+    invariant(pairs[0].involvesToken(wrappedInput), 'INPUT')
+    invariant(typeof output === 'undefined' || pairs[pairs.length - 1].involvesToken(output.wrapped), 'OUTPUT')
+
+    const path: Token[] = [wrappedInput]
     for (const [i, pair] of pairs.entries()) {
       const currentInput = path[i]
       invariant(currentInput.equals(pair.token0) || currentInput.equals(pair.token1), 'PATH')
       const output = currentInput.equals(pair.token0) ? pair.token1 : pair.token0
       path.push(output)
     }
-    invariant(path.length === new Set(path).size, 'PATH')
 
     this.pairs = pairs
     this.path = path
-    this.midPrice = Price.fromRoute(this)
+    this.input = input
+    this.output = output
   }
 
-  get input(): Token {
-    return this.path[0]
+  private _midPrice: Price<TInput, TOutput> | null = null
+
+  public get midPrice(): Price<TInput, TOutput> {
+    if (this._midPrice !== null) return this._midPrice
+    const prices: Price<Currency, Currency>[] = []
+    for (const [i, pair] of this.pairs.entries()) {
+      prices.push(
+        this.path[i].equals(pair.token0)
+          ? new Price(pair.reserve0.currency, pair.reserve1.currency, pair.reserve0.quotient, pair.reserve1.quotient)
+          : new Price(pair.reserve1.currency, pair.reserve0.currency, pair.reserve1.quotient, pair.reserve0.quotient)
+      )
+    }
+    const reduced = prices.slice(1).reduce((accumulator, currentValue) => accumulator.multiply(currentValue), prices[0])
+    return (this._midPrice = new Price(this.input, this.output, reduced.denominator, reduced.numerator))
   }
 
-  get output(): Token {
-    return this.path[this.path.length - 1]
+  public get chainId(): number {
+    return this.pairs[0].chainId
   }
 }
